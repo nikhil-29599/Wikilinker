@@ -44,6 +44,7 @@ import React, {
 import {
   View,
   Text,
+  TextInput,
   StyleSheet,
   Modal,
   Pressable,
@@ -63,7 +64,7 @@ import { type, space, radii } from './theme';
 // SOCKET — one persistent instance for the whole app lifetime
 // ---------------------------------------------------------------------------
 const SERVER_URL =
-  process.env.EXPO_PUBLIC_WIKILINKER_SERVER ?? 'http://YOUR_LOCAL_IP:3000';
+  process.env.EXPO_PUBLIC_WIKILINKER_SERVER ?? 'http://192.168.1.80:3000';
 
 export const socket = io(SERVER_URL, {
   transports: ['websocket'],
@@ -380,6 +381,11 @@ function AppShell() {
   const [achievementToast, setAchievementToast] = useState(null);
   const achToastTimer = useRef(null);
 
+  // Username (persisted)
+  const [username, setUsername] = useState(null);
+  const [usernamePending, setUsernamePending] = useState(true);
+  const [usernameInput, setUsernameInput] = useState('');
+
   // Multiplayer lobby state
   const [isConnected, setIsConnected] = useState(socket.connected);
   const [lobbyCode, setLobbyCode] = useState(null);
@@ -387,9 +393,34 @@ function AppShell() {
   const [isHost, setIsHost] = useState(false);
   const [track, setTrack] = useState({ start: '…', target: '…' });
   const [joinError, setJoinError] = useState(null);
+  const [multiplayerStatus, setMultiplayerStatus] = useState(null);
+  const [raceScores, setRaceScores] = useState(null);
 
   const playerNameRef = useRef(randomName());
   const errorTimer = useRef(null);
+
+  // ── Load persisted username on launch ──
+  useEffect(() => {
+    (async () => {
+      try {
+        const saved = await AsyncStorage.getItem('username');
+        if (saved) {
+          setUsername(saved);
+          playerNameRef.current = saved;
+        }
+      } catch {}
+      setUsernamePending(false);
+    })();
+  }, []);
+
+  // ── Save username when set ──
+  const handleSetUsername = useCallback((name) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    setUsername(trimmed);
+    playerNameRef.current = trimmed;
+    AsyncStorage.setItem('username', trimmed).catch(() => {});
+  }, []);
 
   useEffect(() => {
     getSoloRecords().then(setRecords);
@@ -443,7 +474,18 @@ function AppShell() {
     const onDisconnect = () => setIsConnected(false);
 
     const onRoomUpdate = (payload = {}) => {
-      if (Array.isArray(payload.players)) setPlayersList(payload.players);
+      if (Array.isArray(payload.players)) {
+        setPlayersList(payload.players);
+        // Derive live race scores from the players list (source of truth)
+        setRaceScores(
+          payload.players.map((p) => ({
+            id: p.id,
+            name: p.name,
+            clicks: p.clicks ?? 0,
+            finished: p.finished ?? false,
+          }))
+        );
+      }
       if (payload.track) setTrack(payload.track);
       if (payload.hostId) setIsHost(payload.hostId === socket.id);
     };
@@ -458,15 +500,29 @@ function AppShell() {
       setScreen('game');
     };
 
+    const onRaceStatus = (payload = {}) => {
+      // payload: { players: [{name, finished}], waiting: bool }
+      setMultiplayerStatus(payload);
+    };
+
+    const onRaceUpdateScores = (payload = {}) => {
+      // payload: { scores: [{id, name, clicks, finished}] }
+      setRaceScores(payload.scores ?? null);
+    };
+
     socket.on('connect', onConnect);
     socket.on('disconnect', onDisconnect);
     socket.on('room:update', onRoomUpdate);
     socket.on('race:start', onRaceStart);
+    socket.on('race:status', onRaceStatus);
+    socket.on('race:update-scores', onRaceUpdateScores);
     return () => {
       socket.off('connect', onConnect);
       socket.off('disconnect', onDisconnect);
       socket.off('room:update', onRoomUpdate);
       socket.off('race:start', onRaceStart);
+      socket.off('race:status', onRaceStatus);
+      socket.off('race:update-scores', onRaceUpdateScores);
     };
   }, []);
 
@@ -511,6 +567,17 @@ function AppShell() {
   const handleChangeTrack = useCallback(() => {
     socket.emit('room:shuffle', { code: lobbyCode });
   }, [lobbyCode]);
+
+  const handleEditTrack = useCallback(({ start, target }) => {
+    socket.timeout(ACK_TIMEOUT_MS).emit(
+      'track:change',
+      { code: lobbyCode, start, target },
+      (timeoutErr, res) => {
+        if (timeoutErr) return flashError('Server didn\u2019t respond — is it running?');
+        if (!res?.ok) return flashError(res?.error ?? 'Could not update track');
+      }
+    );
+  }, [lobbyCode, flashError]);
 
   const resetLobbyState = useCallback(() => {
     setLobbyCode(null);
@@ -569,10 +636,12 @@ function AppShell() {
       finished: false,
     });
 
-    if (mode === 'multi' && lobbyCode) {
-      socket.emit('room:leave', { code: lobbyCode });
-      resetLobbyState();
-    }
+    // NOTE: Do NOT emit room:leave or resetLobbyState here.
+    // The room stays alive so the player can return to the lobby
+    // from the results screen via handleRestart or handleBackToLobby.
+    // The room is only cleaned up when the user explicitly presses
+    // LEAVE in the lobby or HOME on the results screen.
+
     if (Array.isArray(path) && path.length) {
       setResult({
         path,
@@ -584,21 +653,42 @@ function AppShell() {
     } else {
       setScreen('home');
     }
-  }, [mode, lobbyCode, resetLobbyState, processRunForAchievements]);
+  }, [processRunForAchievements]);
 
   const handleRestart = useCallback(() => {
     setResult(null);
     setRecordToast(null);
-    setMode('solo');
-    setScreen('home');
-  }, []);
+    if (mode === 'multi') {
+      // Return to the lobby — server still holds the room, don't wipe state.
+      setScreen('lobby');
+    } else {
+      setMode('solo');
+      setScreen('home');
+    }
+  }, [mode]);
 
   const handleRaceAgain = useCallback(({ startPage, targetPage }) => {
+    console.log('[App] handleRaceAgain called — lobbyCode:', lobbyCode, 'mode:', mode);
+    if (lobbyCode) {
+      // Multiplayer: go back to the existing lobby
+      console.log('[App] Active lobby detected — returning to lobby', lobbyCode);
+      setResult(null);
+      setRecordToast(null);
+      setScreen('lobby');
+      return;
+    }
+    // Solo: start a new race
     setResult(null);
     setRecordToast(null);
     setMode('solo');
     setRun({ startPage, targetPage });
     setScreen('game');
+  }, [lobbyCode, mode]);
+
+  const handleBackToLobby = useCallback(() => {
+    setResult(null);
+    setRecordToast(null);
+    setScreen('lobby');
   }, []);
 
   const handleHome = useCallback(() => {
@@ -681,6 +771,8 @@ function AppShell() {
           onStartRace={handleStartRace}
           onLeaveLobby={handleLeaveLobby}
           onChangeTrack={handleChangeTrack}
+          onEditTrack={handleEditTrack}
+          socket={socket}
         />
       )}
 
@@ -691,6 +783,9 @@ function AppShell() {
           onNavigate={handleInGameNavigate}
           onReachedTarget={handleReachedTarget}
           onQuit={handleQuit}
+          multiplayerStatus={mode === 'multi' ? multiplayerStatus : null}
+          raceScores={mode === 'multi' ? raceScores : null}
+          roomCode={lobbyCode}
         />
       )}
 
@@ -703,8 +798,10 @@ function AppShell() {
             startPage={run?.startPage ?? ''}
             targetPage={run?.targetPage ?? ''}
             finished={result.finished}
+            isMultiplayer={mode === 'multi'}
             onRestart={handleRestart}
             onRaceAgain={handleRaceAgain}
+            onBackToLobby={handleBackToLobby}
             onHome={handleHome}
           />
           {recordToast && (
@@ -733,6 +830,46 @@ function AppShell() {
         unlockedIds={achievements}
         onClose={() => setAccoladesOpen(false)}
       />
+
+      {/* ── Username prompt (shown once on first launch) ── */}
+      <Modal visible={usernamePending || !username} transparent animationType="fade">
+        <View style={styles.usernameOverlay}>
+          <View style={[styles.usernameSheet, { backgroundColor: colors.inkRaised, borderColor: colors.hairline }]}>
+            <Text style={[styles.usernameTitle, { color: colors.paper, fontFamily: type.displayBlack }]}>
+              Choose your name
+            </Text>
+            <Text style={[styles.usernameHint, { color: colors.paperDim }]}>
+              This will be your display name in multiplayer races.
+            </Text>
+            <TextInput
+              style={[styles.usernameInput, { borderColor: colors.link, color: colors.paper, fontFamily: type.display }]}
+              value={usernameInput}
+              onChangeText={setUsernameInput}
+              placeholder="Enter your name"
+              placeholderTextColor={colors.paperDim}
+              autoCapitalize="words"
+              autoCorrect={false}
+              maxLength={20}
+              returnKeyType="go"
+              onSubmitEditing={() => handleSetUsername(usernameInput)}
+            />
+            <Pressable
+              onPress={() => handleSetUsername(usernameInput)}
+              disabled={!usernameInput.trim()}
+              style={({ pressed }) => [
+                styles.usernameBtn,
+                { backgroundColor: colors.link },
+                pressed && { backgroundColor: colors.linkPressed },
+                !usernameInput.trim() && { opacity: 0.35 },
+              ]}
+            >
+              <Text style={[styles.usernameBtnText, { color: colors.ink, fontFamily: type.display }]}>
+                SAVE
+              </Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -878,6 +1015,49 @@ const makeRootStyles = (colors) => StyleSheet.create({
     fontSize: 12,
     letterSpacing: 1,
     textAlign: 'center',
+  },
+
+  // ── Username prompt ──
+  usernameOverlay: {
+    flex: 1,
+    backgroundColor: colors.scrim,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  usernameSheet: {
+    width: '85%',
+    maxWidth: 340,
+    borderWidth: 1,
+    borderRadius: radii.card,
+    padding: space(6),
+    gap: space(3),
+  },
+  usernameTitle: {
+    fontSize: 24,
+    textAlign: 'center',
+  },
+  usernameHint: {
+    fontSize: 14,
+    lineHeight: 20,
+    textAlign: 'center',
+  },
+  usernameInput: {
+    borderWidth: 2,
+    borderRadius: radii.card,
+    paddingVertical: space(3),
+    paddingHorizontal: space(4),
+    fontSize: 18,
+    textAlign: 'center',
+  },
+  usernameBtn: {
+    borderRadius: radii.card,
+    paddingVertical: space(4),
+    alignItems: 'center',
+  },
+  usernameBtnText: {
+    fontSize: 18,
+    fontWeight: '700',
+    letterSpacing: 1,
   },
 });
 

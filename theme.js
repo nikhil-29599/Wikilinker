@@ -60,10 +60,10 @@ export const themes = {
 
 // GameScreen theme tokens — Wikipedia-inspired encyclopedia palette
 export const colors = {
-  ink: '#FFFFFF',           // Backgrounds: brilliant clean white
-  inkRaised: '#F8F9FA',     // Cards/modals: Wikipedia's official light grey container tint
-  paper: '#111111',          // Main body text: deep charcoal black
-  paperDim: '#54595D',       // Secondary subtitles: Wikipedia's meta slate grey
+  ink: '#0E1013',           // app background
+  inkRaised: '#171A20',     // cards, sheets
+  paper: '#F5F2EA',         // primary text
+  paperDim: '#9AA0AB',      // secondary text
   link: '#3665D5',          // Hyperlinks: pristine Wikipedia blue
   linkPressed: '#2a4faa',   // Pressed link: slightly darker blue
   gold: '#D6A232',          // Records: sophisticated academic bronze/gold

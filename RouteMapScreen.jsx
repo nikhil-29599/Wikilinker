@@ -53,6 +53,8 @@ export default function RouteMapScreen({
   onRaceAgain,
   onHome,
   finished,
+  isMultiplayer = false,
+  onBackToLobby,
 }) {
   const { colors } = useContext(ThemeContext);
   const styles = useMemo(() => makeStyles(colors), [colors]);
@@ -209,12 +211,21 @@ export default function RouteMapScreen({
           </Text>
         </Pressable>
 
-        <Pressable
-          onPress={() => onRaceAgain?.({ startPage, targetPage })}
-          style={({ pressed }) => [styles.raceBtn, pressed && { backgroundColor: colors.linkPressed }]}
-        >
-          <Text style={styles.raceBtnText}>RACE AGAIN?</Text>
-        </Pressable>
+        {isMultiplayer ? (
+          <Pressable
+            onPress={onBackToLobby}
+            style={({ pressed }) => [styles.raceBtn, pressed && { backgroundColor: colors.linkPressed }]}
+          >
+            <Text style={styles.raceBtnText}>BACK TO LOBBY</Text>
+          </Pressable>
+        ) : (
+          <Pressable
+            onPress={() => onRaceAgain?.({ startPage, targetPage })}
+            style={({ pressed }) => [styles.raceBtn, pressed && { backgroundColor: colors.linkPressed }]}
+          >
+            <Text style={styles.raceBtnText}>RACE AGAIN?</Text>
+          </Pressable>
+        )}
 
         <Pressable
           onPress={onHome}

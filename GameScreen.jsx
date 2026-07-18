@@ -1,8 +1,9 @@
 import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { View, Text, StyleSheet, ActivityIndicator, Platform, Pressable } from 'react-native';
+import { View, Text, StyleSheet, ActivityIndicator, Platform, Pressable, ScrollView } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { ThemeContext } from './ThemeContext';
-import { colors, type, space } from './theme';
+import { type, space } from './theme';
+import { socket } from './App';
 
 const USER_AGENT = 'WikiLinkerApp/1.0 (contact@domain.com) ReactNativeWebView';
 const REST_PREFIX = 'https://en.wikipedia.org/api/rest_v1/page/html/';
@@ -73,21 +74,57 @@ const INJECTED_JS = `
     }));
   }, true);
 
+  // Force white background + black text for readability regardless of app theme
+  document.body.style.backgroundColor = '#ffffff';
+  document.body.style.color = '#000000';
+
+  // Fix images: prepend https: to protocol-relative URLs and remove lazy loading
+  (function fixImages() {
+    var imgs = document.querySelectorAll('img');
+    for (var i = 0; i < imgs.length; i++) {
+      var img = imgs[i];
+      var src = img.getAttribute('src') || '';
+      if (src.indexOf('//') === 0) {
+        img.setAttribute('src', 'https:' + src);
+      }
+      img.removeAttribute('loading');
+    }
+  })();
+
   var css = document.createElement('style');
-  css.textContent = 'a[rel~="mw:ExtLink"]{pointer-events:none;color:inherit;text-decoration:none;} .mw-editsection{display:none;} body{padding:12px;}';
+  css.textContent = 'a[rel~="mw:ExtLink"]{pointer-events:none;color:inherit;text-decoration:none;} .mw-editsection{display:none;} body{padding:12px;background-color:#ffffff;color:#000000;}';
   (document.head || document.documentElement).appendChild(css);
 })();
 true;
 `;
+
+// Distinct background colors for racer badges
+const RACER_COLORS = [
+  '#6366f1', '#10b981', '#f43f5e', '#f59e0b',
+  '#8b5cf6', '#06b6d4', '#ec4899', '#14b8a6',
+];
+
+const getInitials = (name) => {
+  if (!name) return '??';
+  const parts = name.trim().split(/\s+/);
+  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+  return name.slice(0, 2).toUpperCase();
+};
 
 export default function GameScreen({
   startPage = 'Banana',
   targetPage = 'Philosophy',
   onQuit,            
   onNavigate,        
-  onReachedTarget,   
+  onReachedTarget,
+  multiplayerStatus = null, // { players: [{name, finished}], waiting: bool }
+  raceScores = null,       // [{id, name, clicks, finished}] — live from server
+  roomCode = null,         // multiplayer lobby code (for guarded cleanup)
 }) {
-  const { isDarkMode, colors } = useContext(ThemeContext);
+  console.log('[GameScreen] RENDER — raceScores:', JSON.stringify(raceScores), 'multiplayerStatus:', JSON.stringify(multiplayerStatus));
+  const { colors } = useContext(ThemeContext);
+  const s = useMemo(() => makeStyles(colors), [colors]);
+
   const [currentTitle, setCurrentTitle] = useState(startPage);
   const [path, setPath] = useState([startPage]);
   const [loading, setLoading] = useState(true);
@@ -96,11 +133,18 @@ export default function GameScreen({
   const lastNavRef = useRef(0);
   const watchdogRef = useRef(null);
 
+  // ── Guarded cleanup: only emit room:leave on explicit quit, not on
+  //    normal unmount (e.g. navigating to results after reaching target).
+  const didExplicitlyQuit = useRef(false);
+
   const clicks = path.length - 1;
 
-  const currentColors = isDarkMode
-    ? { ink: '#101418', paper: '#F5F6F7', inkRaised: '#1A1F26', hairline: '#2A303A' }
-    : { ink: '#FFFFFF', paper: '#111111', inkRaised: '#F8F9FA', hairline: '#EAECF0' };
+  // ── Diagnostic: log raceScores changes ──
+  useEffect(() => {
+    if (raceScores !== null) {
+      console.log('[GameScreen] raceScores UPDATED:', JSON.stringify(raceScores));
+    }
+  }, [raceScores]);
 
   useEffect(() => {
     if (!raceActive) return;
@@ -114,6 +158,18 @@ export default function GameScreen({
     }
     return () => clearTimeout(watchdogRef.current);
   }, [loading]);
+
+  // ── Guarded cleanup: only emit room:leave on explicit quit ──
+  useEffect(() => {
+    return () => {
+      if (didExplicitlyQuit.current) {
+        console.log('[GameScreen] Cleanup — emitting room:leave (explicit quit)');
+        socket.emit('room:leave', { code: roomCode });
+      } else {
+        console.log('[GameScreen] Cleanup — skipping room:leave (race-restart navigation)');
+      }
+    };
+  }, [roomCode]);
 
   const navigateTo = useCallback((rawTitle) => {
     const now = Date.now();
@@ -203,35 +259,73 @@ export default function GameScreen({
   }), [currentTitle]);
 
   return (
-    <View style={[styles.screen, { backgroundColor: currentColors.ink }]}>
-      <View style={styles.hud}>
+    <View style={s.screen}>
+      <View style={s.hud}>
         <Pressable
-          onPress={() => onQuit?.({ clicks, path, seconds })}
+          onPress={() => {
+            didExplicitlyQuit.current = true;
+            onQuit?.({ clicks, path, seconds });
+          }}
           hitSlop={10}
-          style={({ pressed }) => [styles.quitBtn, pressed && styles.quitPressed]}
+          style={({ pressed }) => [s.quitBtn, pressed && s.quitPressed]}
         >
-          <Text style={styles.quitText}>← QUIT</Text>
+          <Text style={s.quitText}>← QUIT</Text>
         </Pressable>
 
-        <View style={styles.hudMid}>
-          <Text style={styles.hudLabel}>TARGET</Text>
-          <Text style={[styles.hudPage, { color: colors.gold }]} numberOfLines={1}>
+        <View style={s.hudMid}>
+          <Text style={s.hudLabel}>TARGET</Text>
+          <Text style={s.hudPage} numberOfLines={1}>
             {targetPage}
           </Text>
         </View>
 
-        <View style={styles.hudRight}>
-          <Text style={styles.clicks}>{clicks}<Text style={styles.clicksUnit}> CLICKS</Text></Text>
-          <Text style={styles.timer}>{fmtClock(seconds)}</Text>
+        <View style={s.hudRight}>
+          <Text style={s.clicks}>{clicks}<Text style={s.clicksUnit}> CLICKS</Text></Text>
+          <Text style={s.timer}>{fmtClock(seconds)}</Text>
         </View>
       </View>
 
-      <View style={[styles.nowReading, { borderBottomColor: currentColors.hairline }]}>
-        <Text style={styles.hudLabel}>NOW READING</Text>
-        <Text style={styles.hudPage} numberOfLines={1}>{currentTitle}</Text>
+      <View style={s.nowReading}>
+        <Text style={s.hudLabel}>NOW READING</Text>
+        <Text style={s.hudPage} numberOfLines={1}>{currentTitle}</Text>
       </View>
 
-      <View style={styles.webWrap}>
+      {/* ── Race Ticker ── */}
+      {raceScores !== null && (
+        <View style={s.raceTicker}>
+          {raceScores.length <= 1 ? (
+            <Text style={s.raceTickerWaiting}>
+              ⏳ Waiting for opponents to join the race…
+            </Text>
+          ) : (
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={s.raceTickerScroll}
+            >
+              {raceScores.map((racer, idx) => {
+                const bgColor = RACER_COLORS[idx % RACER_COLORS.length];
+                const finished = racer.finished ?? false;
+                return (
+                  <View key={racer.id ?? racer.name} style={s.racerBadge}>
+                    <View style={[s.racerAvatar, { backgroundColor: bgColor, opacity: finished ? 1 : 0.85 }]}>
+                      <Text style={s.racerInitials}>{getInitials(racer.name)}</Text>
+                    </View>
+                    <Text style={[s.racerClicks, finished && { color: colors.gold }]}>
+                      {racer.clicks ?? 0}
+                    </Text>
+                    {finished && (
+                      <Text style={s.racerCheck}>✓</Text>
+                    )}
+                  </View>
+                );
+              })}
+            </ScrollView>
+          )}
+        </View>
+      )}
+
+      <View style={s.webWrap}>
         <WebView
           source={source}
           userAgent={USER_AGENT}
@@ -250,12 +344,12 @@ export default function GameScreen({
           domStorageEnabled
           originWhitelist={['https://*']}
           decelerationRate="normal"
-          style={styles.webview}
+          style={{ flex: 1, backgroundColor: '#ffffff' }}
         />
         {loading && (
-          <View style={[styles.loading, { backgroundColor: currentColors.ink }]}>
+          <View style={s.loading}>
             <ActivityIndicator color={colors.link} size="large" />
-            <Text style={styles.loadingText}>turning the page…</Text>
+            <Text style={s.loadingText}>turning the page…</Text>
           </View>
         )}
       </View>
@@ -263,8 +357,8 @@ export default function GameScreen({
   );
 }
 
-const styles = StyleSheet.create({
-  screen: { flex: 1 },
+const makeStyles = (colors) => StyleSheet.create({
+  screen: { flex: 1, backgroundColor: colors.ink },
   hud: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -301,15 +395,71 @@ const styles = StyleSheet.create({
     paddingHorizontal: space(4),
     paddingBottom: space(3),
     borderBottomWidth: 1,
+    borderBottomColor: colors.hairline,
   },
 
   webWrap: { flex: 1 },
-  webview: { flex: 1, backgroundColor: '#fff' },
+  webview: { 
+    flex: 1, 
+    backgroundColor: colors.ink 
+  },
   loading: {
     ...StyleSheet.absoluteFillObject,
+    backgroundColor: colors.ink,
     alignItems: 'center',
     justifyContent: 'center',
     gap: space(3),
   },
   loadingText: { color: colors.paperDim, fontFamily: type.mono, fontSize: 12 },
+
+  raceTicker: {
+    paddingVertical: space(2),
+    borderBottomWidth: 1,
+    borderBottomColor: colors.hairline,
+    backgroundColor: colors.inkRaised,
+  },
+  raceTickerWaiting: {
+    color: colors.paperDim,
+    fontFamily: type.mono,
+    fontSize: 11,
+    letterSpacing: 1,
+    textAlign: 'center',
+    paddingHorizontal: space(4),
+  },
+  raceTickerScroll: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: space(3),
+    gap: space(3),
+  },
+  racerBadge: {
+    alignItems: 'center',
+    gap: 2,
+    minWidth: 44,
+  },
+  racerAvatar: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  racerInitials: {
+    color: '#fff',
+    fontFamily: type.mono,
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  racerClicks: {
+    color: colors.paper,
+    fontFamily: type.mono,
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  racerCheck: {
+    color: colors.gold,
+    fontFamily: type.mono,
+    fontSize: 9,
+    marginTop: -2,
+  },
 });
