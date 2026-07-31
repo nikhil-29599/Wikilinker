@@ -40,3 +40,9 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# ── wikilinker-server ──────────────────────────────────────────────────────
+wikilinker-server/node_modules/
+wikilinker-server/.env
+wikilinker-server/*.log
+
