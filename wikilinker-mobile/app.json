@@ -16,6 +16,7 @@
       }
     },
     "android": {
+      "package": "com.nikhil29599.wikilinkermobile",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",

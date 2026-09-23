@@ -8,6 +8,7 @@ node_modules/
 dist/
 web-build/
 expo-env.d.ts
+wikilinker-mobile/Expo-Go-*.app/
 
 # Native
 .kotlin/
@@ -45,4 +46,3 @@ yarn-error.*
 wikilinker-server/node_modules/
 wikilinker-server/.env
 wikilinker-server/*.log
-

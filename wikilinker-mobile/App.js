@@ -32,6 +32,10 @@
 // EXPO GO NOTE: 'localhost' will NOT work from a physical iPhone. Use your
 // Mac Mini's LAN IP (e.g. http://192.168.1.42:3000) or set
 // EXPO_PUBLIC_WIKILINKER_SERVER in .env.
+//
+// PRODUCTION: defaults to the live Render backend. Override with
+// EXPO_PUBLIC_WIKILINKER_SERVER for local development.
+
 
 import React, {
   useCallback,
@@ -64,7 +68,8 @@ import { type, space, radii } from './theme';
 // SOCKET — one persistent instance for the whole app lifetime
 // ---------------------------------------------------------------------------
 const SERVER_URL =
-  process.env.EXPO_PUBLIC_WIKILINKER_SERVER ?? 'http://192.168.1.80:3000';
+  process.env.EXPO_PUBLIC_WIKILINKER_SERVER ?? 'https://wikilinker-webservice.onrender.com';
+
 
 export const socket = io(SERVER_URL, {
   transports: ['websocket'],
